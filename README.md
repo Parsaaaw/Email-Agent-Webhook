@@ -72,8 +72,6 @@ one repo and deploys as a single Cloudflare Worker.
 ### 1. Install dependencies
 
 ```bash
-git clone https://github.com/Parsaaaw/Email-Agent-Webhook/
-cd Email-Agent-Webhook
 npm install
 ```
 

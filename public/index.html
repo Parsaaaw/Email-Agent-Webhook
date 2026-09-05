@@ -701,6 +701,20 @@
     };
   }
 
+  // Handles the case where something sets `location.hash` to "#<id>" on a
+  // page that's already loaded (e.g. the desktop app's toast-click reuses
+  // the already-open iframe and only changes the URL fragment). A fragment
+  // -only change to an already-loaded document is a same-document
+  // navigation, not a reload — no new WS 'init' fires, so the one-shot
+  // restore-from-hash logic above never runs for it. This listener covers
+  // that path independently of the initial-load restore.
+  window.addEventListener('hashchange', () => {
+    const hashId = location.hash.slice(1);
+    if (hashId && emailsById.has(hashId) && hashId !== selectedId) {
+      selectEmail(hashId);
+    }
+  });
+
   const savedTheme = localStorage.getItem('theme') || 'dark';
   document.documentElement.setAttribute('data-theme', savedTheme);
   themeBtn.addEventListener('click', () => {
