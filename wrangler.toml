@@ -1,0 +1,42 @@
+name = "email-agent-worker"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Static dashboard UI (public/index.html + icons). Any request that doesn't
+# match a real file falls through to the Worker's fetch handler.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# D1 — replaces the old Railway Postgres service.
+# Create with: npx wrangler d1 create email-agent-db
+# then paste the returned database_id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "email-agent-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# Durable Objects — one for the live dashboard WebSocket hub,
+# one backing the remote MCP server (agents/mcp McpAgent needs this).
+[[durable_objects.bindings]]
+name = "DASHBOARD_HUB"
+class_name = "DashboardHub"
+
+[[durable_objects.bindings]]
+name = "EMAIL_MCP"
+class_name = "EmailMcp"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DashboardHub", "EmailMcp"]
+
+# Secrets (set with `npx wrangler secret put <NAME>`, never in this file):
+#   EMAIL_WEBHOOK_SECRET   - shared secret for /webhook/email, /api/*, /mcp
+#   AGENT_WEBHOOK_URL      - optional: forward every email to another agent
+#   HERMES_API_URL         - optional: OpenAI-compatible endpoint for auto-triage
+#   HERMES_API_KEY         - optional: bearer token for the above
+#   HERMES_MODEL           - optional: model name (default "hermes-3")
+
+[vars]
+BROADCAST_INTERVAL_MS = "10000"

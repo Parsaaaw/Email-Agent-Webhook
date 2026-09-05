@@ -1,0 +1,22 @@
+{
+  "name": "email-agent-worker",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate": "wrangler d1 execute email-agent-db --file=./schema.sql",
+    "db:migrate:remote": "wrangler d1 execute email-agent-db --remote --file=./schema.sql",
+    "tail": "wrangler tail"
+  },
+  "dependencies": {
+    "agents": "^0.0.90",
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "postal-mime": "^2.2.7",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  }
+}
