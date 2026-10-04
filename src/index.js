@@ -13,6 +13,62 @@ function checkSecret(request, env) {
   return request.headers.get('x-email-secret') === env.EMAIL_WEBHOOK_SECRET;
 }
 
+// --- Dashboard login (web only) ---------------------------------------------
+// The browser dashboard logs in with the same EMAIL_WEBHOOK_SECRET and gets an
+// HttpOnly session cookie (HMAC of the secret, so rotating the secret logs
+// everyone out). This only guards the dashboard routes (/ws, /emails*).
+// /mcp and /api/* keep their own header/query-string check and never look at
+// the cookie, so Claude Desktop / Claude Code are completely unaffected.
+const SESSION_COOKIE = 'ea_session';
+const SESSION_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
+const encoder = new TextEncoder();
+
+function toHex(buf) {
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function sessionToken(env) {
+  const key = await crypto.subtle.importKey(
+    'raw', encoder.encode(env.EMAIL_WEBHOOK_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+  );
+  return toHex(await crypto.subtle.sign('HMAC', key, encoder.encode('email-agent-dashboard-session-v1')));
+}
+
+// Constant-time string compare (hash both sides first so lengths match).
+async function safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const [ha, hb] = await Promise.all([
+    crypto.subtle.digest('SHA-256', encoder.encode(a)),
+    crypto.subtle.digest('SHA-256', encoder.encode(b)),
+  ]);
+  const x = new Uint8Array(ha), y = new Uint8Array(hb);
+  let diff = 0;
+  for (let i = 0; i < x.length; i++) diff |= x[i] ^ y[i];
+  return diff === 0;
+}
+
+function getCookie(request, name) {
+  const m = (request.headers.get('cookie') || '').match(new RegExp(`(?:^|;\s*)${name}=([^;]+)`));
+  return m ? m[1] : null;
+}
+
+async function dashboardAuthed(request, env) {
+  if (!env.EMAIL_WEBHOOK_SECRET) return true; // no secret configured → open (same as before)
+  const header = request.headers.get('x-email-secret');
+  if (header && (await safeEqual(header, env.EMAIL_WEBHOOK_SECRET))) return true; // scripts/curl, desktop app
+
+  // Session token: HttpOnly cookie, or (for webviews that block third-party
+  // cookies, e.g. the desktop app's iframe) the same token sent in the
+  // x-email-session header. Browsers can't set headers on a WebSocket, so
+  // /ws alone also accepts it as ?session=.
+  const url = new URL(request.url);
+  const presented =
+    getCookie(request, SESSION_COOKIE) ||
+    request.headers.get('x-email-session') ||
+    (url.pathname === '/ws' ? url.searchParams.get('session') : null);
+  return !!presented && (await safeEqual(presented, await sessionToken(env)));
+}
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -152,6 +208,45 @@ export default {
       // so that default lookup fails ("Invalid binding") unless we tell it
       // the actual binding name explicitly.
       return EmailMcp.serve('/mcp', { binding: 'EMAIL_MCP' }).fetch(request, env, ctx);
+    }
+
+    // --- Dashboard login ---
+    if (url.pathname === '/auth/check' && request.method === 'GET') {
+      if (!(await dashboardAuthed(request, env))) return json({ error: 'unauthorized' }, 401);
+      return json({ ok: true, authRequired: !!env.EMAIL_WEBHOOK_SECRET });
+    }
+
+    if (url.pathname === '/auth/login' && request.method === 'POST') {
+      if (!env.EMAIL_WEBHOOK_SECRET) return json({ ok: true, authRequired: false });
+      const body = await request.json().catch(() => ({}));
+      if (!(await safeEqual(String(body.secret || ''), env.EMAIL_WEBHOOK_SECRET))) {
+        await new Promise((r) => setTimeout(r, 500)); // slow down guessing
+        return json({ error: 'invalid secret' }, 401);
+      }
+      const token = await sessionToken(env);
+      return new Response(JSON.stringify({ ok: true, token }), {
+        headers: {
+          'content-type': 'application/json',
+          'set-cookie': `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${SESSION_MAX_AGE}`,
+        },
+      });
+    }
+
+    if (url.pathname === '/auth/logout' && request.method === 'POST') {
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: {
+          'content-type': 'application/json',
+          'set-cookie': `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`,
+        },
+      });
+    }
+
+    // Gate everything the dashboard uses to read/modify mail.
+    if (
+      (url.pathname === '/ws' || url.pathname === '/emails' || url.pathname.startsWith('/emails/')) &&
+      !(await dashboardAuthed(request, env))
+    ) {
+      return json({ error: 'unauthorized' }, 401);
     }
 
     // --- Live dashboard WebSocket, proxied straight to the singleton Durable Object ---

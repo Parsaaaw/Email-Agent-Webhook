@@ -36,6 +36,7 @@ one repo and deploys as a single Cloudflare Worker.
   see a flash of an empty inbox. It fades out once and won't reappear on
   later reconnects — a small dot in the header shows live/reconnecting
   status after that.
+- Sign-in screen (same `EMAIL_WEBHOOK_SECRET`) with session cookie and a sign-out button
 - Read/unread, star, archive (with undo), bulk actions, search, and a
   filter panel (sender, domain, field, date range, has-attachment)
 - Light/dark theme toggle (persisted in `localStorage`)
@@ -242,19 +243,22 @@ Worker supports both.)
 
 ## HTTP API reference
 
-Routes under `/emails/*` (used by the dashboard) are **not** secret-gated.
-Routes under `/api/*`, `/webhook/email`, and `/mcp` require
-`EMAIL_WEBHOOK_SECRET` when it's set.
+Dashboard routes (`/ws`, `/emails*`) accept either the login session cookie or
+the `x-email-secret` header. `/api/*`, `/webhook/email`, and `/mcp` require
+`EMAIL_WEBHOOK_SECRET` (header, or `?secret=` for `/mcp`) when it's set.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/` | — | Dashboard UI (static assets) |
-| GET | `/ws` | — | Dashboard WebSocket (live updates) |
-| GET | `/emails` | — | Recent emails (used by the dashboard) |
-| GET | `/emails/search` | — | Filtered emails (used by the dashboard) |
-| POST | `/emails/:id/read` | — | Mark read/unread |
-| POST | `/emails/:id/star` | — | Star/unstar |
-| POST | `/emails/:id/archive` | — | Archive/unarchive |
+| GET | `/ws` | session or secret | Dashboard WebSocket (live updates) |
+| GET | `/emails` | session or secret | Recent emails (used by the dashboard) |
+| GET | `/emails/search` | session or secret | Filtered emails (used by the dashboard) |
+| POST | `/emails/:id/read` | session or secret | Mark read/unread |
+| POST | `/emails/:id/star` | session or secret | Star/unstar |
+| POST | `/emails/:id/archive` | session or secret | Archive/unarchive |
+| POST | `/auth/login` | — | Exchange the secret for a dashboard session cookie |
+| POST | `/auth/logout` | — | Clear the session cookie |
+| GET | `/auth/check` | session or secret | 200 if signed in, 401 otherwise |
 | GET | `/api/status` | — | Health check |
 | GET | `/api/emails` | secret | Recent emails (external integrations) |
 | GET | `/api/emails/:id` | secret | Single email by id |
@@ -262,13 +266,24 @@ Routes under `/api/*`, `/webhook/email`, and `/mcp` require
 | POST | `/webhook/email` | secret | Ingest an email from JSON (alternative to native Email Routing) |
 | ANY | `/mcp` | secret | MCP server (Streamable HTTP) |
 
-> **Security note:** the dashboard and its `/emails*` routes have no auth of
-> their own — anyone with the Worker's URL can read every email, including
-> verification codes, if they know or guess it. This is fine for quick
-> personal use on an obscure `*.workers.dev` URL, but if you're relying on
-> this for real accounts, put it behind something like [Cloudflare
-> Access](https://developers.cloudflare.com/cloudflare-one/policies/access/)
-> or add your own auth in front of the dashboard routes.
+> **Dashboard login:** when `EMAIL_WEBHOOK_SECRET` is set, the web dashboard
+> shows a sign-in screen and asks for that same secret. On success the Worker
+> sets an `HttpOnly; Secure; SameSite=Strict` session cookie (30 days) that
+> covers the dashboard's `fetch` calls and its WebSocket. Rotating the secret
+> invalidates every existing session. If no secret is configured, the
+> dashboard stays open (handy for local dev) — so set one before deploying.
+>
+> This only guards the dashboard routes (`/ws`, `/emails*`). `/mcp` and
+> `/api/*` have their own header / query-string check and ignore the cookie,
+> so Claude Desktop, Claude Code and scripts are unaffected by the web login.
+> Scripts can also call `/emails*` directly with the `x-email-secret` header.>
+> Some webviews (for example the desktop app, which shows the dashboard inside
+> an iframe) refuse to keep third-party cookies. For those, a successful login
+> also returns the same session token in its JSON response; the page keeps it
+> in `localStorage` and sends it as an `x-email-session` header (and as
+> `?session=` on the `/ws` handshake only, since browsers can't set WebSocket
+> headers). The desktop app skips the form entirely by posting its stored
+> secret to the dashboard page.
 
 ---
 

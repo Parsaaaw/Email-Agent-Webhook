@@ -135,6 +135,16 @@
   @keyframes splash-pulse{ 0%,100%{ opacity:.5; transform: scale(.94); } 50%{ opacity:1; transform: scale(1); } }
   .splash-title{ font-size: 14px; font-weight: 600; color: var(--text); letter-spacing: .2px; }
   .splash-sub{ font-size: 12px; color: var(--text-3); }
+  /* Login screen (shown only when the server says a secret is required) */
+  .login{ position: fixed; inset: 0; z-index: 110; background: var(--bg); display:none; align-items:center; justify-content:center; }
+  .login.show{ display:flex; }
+  .login-box{ width: 300px; display:flex; flex-direction:column; align-items:center; gap: 12px; }
+  .login-box img{ width: 52px; height: 52px; object-fit: contain; }
+  .login-box input{ width:100%; box-sizing:border-box; padding: 10px 12px; border:1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--text); font-size: 14px; font-family: inherit; }
+  .login-box input:focus{ outline:none; border-color: var(--accent); }
+  .login-box button{ width:100%; padding: 10px; border:0; border-radius: 8px; background: var(--accent); color:#fff; font-weight:600; font-size:14px; cursor:pointer; font-family: inherit; }
+  .login-box button:disabled{ opacity:.6; cursor: default; }
+  .login-err{ min-height: 16px; font-size: 12px; color: #d9534f; }
   .row{ display:flex; align-items:center; gap:12px; padding: 0 20px; height: 42px; border-bottom: 1px solid var(--border); cursor: pointer; }
   .row:hover{ background: var(--row-hover); box-shadow: inset 1px 0 0 var(--border), inset -1px 0 0 var(--border); }
   .row:hover .r-star{ opacity:1; }
@@ -202,6 +212,16 @@
     <div class="splash-title">Inbox</div>
     <div class="splash-sub" id="splashSub">connecting…</div>
   </div>
+  <div class="login" id="loginScreen">
+    <div class="login-box">
+      <img src="/Nones.png" alt="" />
+      <div class="splash-title">Inbox</div>
+      <input type="password" id="loginSecret" placeholder="Secret" autocomplete="current-password" />
+      <button id="loginBtn">Sign in</button>
+      <div class="login-err" id="loginErr"></div>
+      <div class="splash-sub" id="loginHint" style="display:none;text-align:center">Tip: save the secret in the app's Settings (gear, top right) to sign in automatically.</div>
+    </div>
+  </div>
   <header>
     <h1>Inbox</h1>
     <div class="header-search">
@@ -213,6 +233,9 @@
     <div class="status-row">
       <span class="pill-stat"><b id="count">0</b> emails</span>
       <span class="live"><span class="dot" id="dot"></span><span id="liveLabel">connecting</span></span>
+      <button class="theme-btn" id="logoutBtn" aria-label="sign out" title="Sign out" style="display:none">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+      </button>
       <button class="theme-btn" id="themeBtn" aria-label="toggle theme">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
       </button>
@@ -315,6 +338,7 @@
   // on this page load — only do that once, right after the first WS 'init',
   // not on every later 'refresh' push.
   let restoredFromUrl = false;
+  let wsActive = false;
   let splashHidden = false;
   function hideSplash(){
     if (splashHidden) return;
@@ -672,9 +696,19 @@
 
   function connect(){
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${proto}//${location.host}/ws`);
+    if (wsActive) return;
+    wsActive = true;
+    const ws = new WebSocket(`${proto}//${location.host}/ws${token ? `?session=${encodeURIComponent(token)}` : ''}`);
     ws.onopen = () => { setLive(true); if (!splashHidden) splashSubEl.textContent = 'loading your inbox…'; };
-    ws.onclose = () => { setLive(false); if (!splashHidden) splashSubEl.textContent = 'reconnecting…'; setTimeout(connect, 2000); };
+    ws.onclose = async () => {
+      wsActive = false;
+      setLive(false);
+      if (!splashHidden) splashSubEl.textContent = 'reconnecting…';
+      // Session expired / secret rotated? Show the login form instead of
+      // looping on a handshake that will keep failing with 401.
+      try { const r = await fetch('/auth/check'); if (r.status === 401) return; } catch (e) {}
+      setTimeout(connect, 2000);
+    };
     ws.onerror = () => ws.close();
     ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data);
@@ -764,7 +798,122 @@
     fetch('/emails').then(r => r.json()).then(emails => setAll(emails)).catch(err => console.error(err));
   });
 
-  connect();
+  // --- Login ---------------------------------------------------------------
+  // Auth works two ways: an HttpOnly cookie (normal browsers) and a session
+  // token kept in localStorage and sent as a header (webviews that block
+  // third-party cookies — the desktop app shows this page inside an iframe).
+  // The desktop shell can also postMessage the secret it already stores, so
+  // nobody has to type it there.
+  const loginEl = document.getElementById('loginScreen');
+  const loginInput = document.getElementById('loginSecret');
+  const loginBtn = document.getElementById('loginBtn');
+  const loginErr = document.getElementById('loginErr');
+  const loginHint = document.getElementById('loginHint');
+  const logoutBtn = document.getElementById('logoutBtn');
+  const embedded = window.parent !== window;
+  if (embedded) loginHint.style.display = '';
+
+  let token = null;
+  try { token = localStorage.getItem('ea_token'); } catch (e) {}
+  function setToken(t) {
+    token = t;
+    try { t ? localStorage.setItem('ea_token', t) : localStorage.removeItem('ea_token'); } catch (e) {}
+  }
+
+  let loginTimer = null;
+  let graceOver = false;
+  let authed = false;
+
+  function revealLogin(){
+    loginTimer = null;
+    hideSplash();
+    if (!loginEl.classList.contains('show')) {
+      loginEl.classList.add('show');
+      setTimeout(() => loginInput.focus(), 50);
+    }
+  }
+  // Inside the desktop app, give the shell a moment to push the stored
+  // secret before showing the form, so it never flashes.
+  function showLogin(){
+    if (authed || loginEl.classList.contains('show') || loginTimer) return;
+    if (embedded && !graceOver) {
+      loginTimer = setTimeout(() => { graceOver = true; if (!authed) revealLogin(); else loginTimer = null; }, 2500);
+      return;
+    }
+    revealLogin();
+  }
+
+  const _fetch = window.fetch.bind(window);
+  window.fetch = async (input, init = {}) => {
+    const u = String(typeof input === 'string' ? input : (input && input.url) || '');
+    let opts = init;
+    if (token && u.startsWith('/')) {
+      const h = new Headers(init.headers || {});
+      h.set('x-email-session', token);
+      opts = { ...init, headers: h };
+    }
+    const r = await _fetch(input, opts);
+    if (r.status === 401 && !u.startsWith('/auth/login')) showLogin();
+    return r;
+  };
+
+  async function login(secret, silent){
+    if (!silent) { loginBtn.disabled = true; loginErr.textContent = ''; }
+    try {
+      const r = await _fetch('/auth/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ secret }),
+      });
+      if (r.ok) {
+        const data = await r.json().catch(() => ({}));
+        if (data.token) setToken(data.token);
+        authed = true;
+        if (loginTimer) { clearTimeout(loginTimer); loginTimer = null; }
+        loginEl.classList.remove('show');
+        if (data.authRequired !== false && !embedded) logoutBtn.style.display = '';
+        start();
+        return true;
+      }
+      if (!silent) loginErr.textContent = 'Wrong secret';
+    } catch (e) {
+      if (!silent) loginErr.textContent = 'Network error';
+    }
+    if (!silent) { loginBtn.disabled = false; loginInput.select(); }
+    return false;
+  }
+
+  loginBtn.addEventListener('click', () => login(loginInput.value, false));
+  loginInput.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') login(loginInput.value, false); });
+
+  // Desktop shell → dashboard: the app already stores the secret.
+  window.addEventListener('message', (ev) => {
+    if (ev.source !== window.parent) return;
+    const d = ev.data;
+    if (d && d.type === 'email-agent-auth' && typeof d.secret === 'string' && d.secret) login(d.secret, true);
+  });
+
+  logoutBtn.addEventListener('click', async () => {
+    await _fetch('/auth/logout', { method: 'POST' });
+    setToken(null);
+    location.reload();
+  });
+
+  // Start the live connection once (and again after re-login if it dropped).
+  function start(){ if (!wsActive) connect(); }
+
+  async function boot(){
+    try {
+      const r = await fetch('/auth/check');
+      if (r.status === 401) return; // wrapper already scheduled/showed the login screen
+      authed = true;
+      const info = await r.json().catch(() => ({}));
+      if (info.authRequired && !embedded) logoutBtn.style.display = '';
+    } catch (e) { /* offline — connect() has its own retry */ }
+    start();
+  }
+
+  boot();
 </script>
 </body>
 </html>
